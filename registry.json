@@ -1,0 +1,22 @@
+{
+    "$schema": "https://ui.shadcn.com/schema/registry.json",
+    "name": "time-picker",
+    "homepage": "https://github.com/michroucka/time-picker",
+    "items": [
+        {
+            "name": "time-picker",
+            "type": "registry:ui",
+            "title": "Time Picker",
+            "description": "A styled replacement for <input type=\"time\"> — a two-column hour/minute wheel popover (iOS-style) plus free-form typing, with an actually-enforced step and a built-in compact/ghost variant.",
+            "dependencies": ["class-variance-authority", "lucide-react"],
+            "registryDependencies": ["input", "button", "popover"],
+            "files": [
+                {
+                    "path": "components/ui/time-picker.tsx",
+                    "type": "registry:ui",
+                    "target": "components/ui/time-picker.tsx"
+                }
+            ]
+        }
+    ]
+}

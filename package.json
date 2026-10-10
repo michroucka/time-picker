@@ -1,0 +1,11 @@
+{
+    "name": "time-picker-registry",
+    "private": true,
+    "version": "1.0.0",
+    "scripts": {
+        "build": "shadcn build"
+    },
+    "devDependencies": {
+        "shadcn": "^4.21.4"
+    }
+}
