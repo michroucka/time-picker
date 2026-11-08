@@ -33,6 +33,9 @@ import {
 const MINUTES_PER_DAY = 24 * 60;
 const ITEM_HEIGHT = 36; // px — must match the row height class below
 const VISIBLE_ROWS = 5;
+// px of accumulated wheel delta that move the wheel by one row – below a
+// mouse notch (~100), so a notch is always exactly one step
+const WHEEL_STEP_THRESHOLD = 40;
 
 // Two looks the trigger ships with out of the box — `className` is for a
 // one-off tweak on top (e.g. `text-right`), not for rebuilding a whole
@@ -131,33 +134,51 @@ function nearestIndex(values: number[], target: number) {
     return bestIndex;
 }
 
+// How many copies of the values a looping wheel renders. The wheel always
+// settles back into the middle copy, so the copies around it only have to
+// cover one fast drag or a burst of wheel notches.
+const LOOP_COPIES = 5;
+const MIDDLE_COPY = Math.floor(LOOP_COPIES / 2);
+
+// A looping wheel renders its values in an odd number of copies, at least
+// this many rows in total, so a short list (12 minutes) gets as much room
+// for a fast drag as the hours do. It keeps returning to the middle copy.
+const LOOP_MIN_ROWS = 120;
+
+function loopCopies(length: number) {
+    const copies = Math.max(5, Math.ceil(LOOP_MIN_ROWS / length));
+    return copies % 2 === 0 ? copies + 1 : copies;
+}
+
 // One scrollable, snap-to-row wheel (hours or minutes). The selection slot
-// is a fixed highlight band at vertical center — the content scrolls
+// is a fixed highlight band at vertical center – the content scrolls
 // underneath it, same mechanic as iOS's UIPickerView.
+//
+// With `loop` the values repeat (… 22 23 | 00 01 … 23 | 00 01 …) so the
+// wheel never hits an end: scrolling up from 00 goes on to 23. Every row
+// is a real element; after a scroll settles, the wheel jumps (without
+// animation) to the same value in the middle copy.
 function WheelColumn({
     values,
     format,
     selected,
     onSelect,
+    loop = false,
     "aria-label": ariaLabel,
 }: {
     values: number[];
     format: (value: number) => string;
     selected: number;
     onSelect: (value: number) => void;
+    loop?: boolean;
     "aria-label": string;
 }) {
     const containerRef = React.useRef<HTMLDivElement>(null);
-    // Real rendered positions, not an assumed ITEM_HEIGHT*index — CSS
-    // scroll-snap resolves its own "nearest snap point" after a scroll/
-    // scrollTo settles, and that doesn't always match a hand-computed
-    // offset (padding + snap interact in browser-specific ways). Measuring
-    // actual offsetTop/clientHeight sidesteps the mismatch entirely instead
-    // of fighting it with a more "correct" constant.
+    // Real rendered positions, not an assumed ITEM_HEIGHT*index – measuring
+    // actual offsetTop/clientHeight avoids any mismatch between a computed
+    // offset and where the browser really put the rows.
     const itemRefs = React.useRef<(HTMLButtonElement | null)[]>([]);
-    const scrollTimer = React.useRef<ReturnType<typeof setTimeout> | undefined>(
-        undefined
-    );
+    const scrollTimer = React.useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
     const hasPositionedRef = React.useRef(false);
     // Drag state for the manual pointer-scroll below. `dragging` only
     // flips true past a small movement threshold, so a plain tap still
@@ -169,31 +190,89 @@ function WheelColumn({
         startScrollTop: number;
         dragging: boolean;
     } | null>(null);
-    const targetIndex = nearestIndex(values, selected);
 
-    function scrollToIndex(index: number, smooth: boolean) {
+    // Looping a list shorter than the wheel would show one value twice at once.
+    const isLooping = loop && values.length >= VISIBLE_ROWS;
+    const copies = isLooping ? loopCopies(values.length) : 1;
+    const middleCopy = Math.floor(copies / 2);
+    const rows = React.useMemo(
+        () => Array.from({ length: values.length * copies }, (_, i) => values[i % values.length]),
+        [values, copies]
+    );
+    const middleOffset = middleCopy * values.length;
+    const selectedIndex = nearestIndex(values, selected);
+
+    // The row currently at the center. With looping the selected value is on
+    // several rows; this says which one, so the wheel animates to the
+    // neighbouring copy (00 → 23 above it) instead of spinning a whole lap.
+    const centerRowRef = React.useRef(selectedIndex + middleOffset);
+    if (centerRowRef.current >= rows.length) centerRowRef.current = selectedIndex + middleOffset;
+
+    let targetRow = selectedIndex;
+    if (isLooping) {
+        let closestDistance = Infinity;
+        for (let copy = 0; copy < copies; copy++) {
+            const row = copy * values.length + selectedIndex;
+            const distance = Math.abs(row - centerRowRef.current);
+            if (distance < closestDistance) {
+                closestDistance = distance;
+                targetRow = row;
+            }
+        }
+    }
+
+    function scrollToRow(row: number, smooth: boolean) {
         const container = containerRef.current;
-        const item = itemRefs.current[index];
+        const item = itemRefs.current[row];
         if (!container || !item) return;
-        const top =
-            item.offsetTop - (container.clientHeight - item.offsetHeight) / 2;
+        const top = item.offsetTop - (container.clientHeight - item.offsetHeight) / 2;
         if (Math.abs(container.scrollTop - top) > 1) {
             container.scrollTo({ top, behavior: smooth ? "smooth" : "auto" });
         }
     }
 
     React.useEffect(() => {
-        scrollToIndex(targetIndex, hasPositionedRef.current);
+        centerRowRef.current = targetRow;
+        scrollToRow(targetRow, hasPositionedRef.current);
         hasPositionedRef.current = true;
-    }, [targetIndex]);
+    }, [targetRow]);
+
+    // Moves a looping wheel from an outer copy back to the same value in the
+    // middle copy without animation, so there is always room to keep going.
+    function recenter(row: number) {
+        const container = containerRef.current;
+        const middleRow = middleOffset + (row % values.length);
+        const from = itemRefs.current[row];
+        const to = itemRefs.current[middleRow];
+        if (!container || !from || !to || middleRow === row) return;
+        container.scrollTop += to.offsetTop - from.offsetTop;
+        centerRowRef.current = middleRow;
+    }
+
+    // While scrolling, a looping wheel that reaches its first or last copy
+    // jumps by whole copies back to the middle right away – waiting for the
+    // scroll to settle would let a fast drag run off the end. A running drag
+    // is shifted by the same amount so it continues seamlessly.
+    function keepAwayFromEnds() {
+        const container = containerRef.current;
+        if (!container) return;
+        const centerRow = Math.round(container.scrollTop / ITEM_HEIGHT);
+        const copy = Math.floor(centerRow / values.length);
+        if (copy > 0 && copy < copies - 1) return;
+        const shift = (middleCopy - copy) * values.length;
+        container.scrollTop += shift * ITEM_HEIGHT;
+        if (dragRef.current) dragRef.current.startScrollTop += shift * ITEM_HEIGHT;
+        centerRowRef.current += shift;
+    }
 
     function handleScroll() {
+        if (isLooping) keepAwayFromEnds();
         clearTimeout(scrollTimer.current);
         scrollTimer.current = setTimeout(() => {
             const container = containerRef.current;
             if (!container) return;
             const center = container.scrollTop + container.clientHeight / 2;
-            let closestIndex = 0;
+            let closestRow = 0;
             let closestDiff = Infinity;
             itemRefs.current.forEach((item, i) => {
                 if (!item) return;
@@ -201,25 +280,70 @@ function WheelColumn({
                 const diff = Math.abs(itemCenter - center);
                 if (diff < closestDiff) {
                     closestDiff = diff;
-                    closestIndex = i;
+                    closestRow = i;
                 }
             });
-            const value = values[closestIndex];
-            if (value !== undefined && value !== selected) onSelect(value);
+            centerRowRef.current = closestRow;
+            if (isLooping) recenter(closestRow);
+            const value = rows[closestRow];
+            if (value !== undefined && value !== selected) {
+                onSelect(value);
+            } else {
+                // same value as before (e.g. a drag released near where it
+                // started): still snap the row exactly to the center
+                scrollToRow(centerRowRef.current, true);
+            }
         }, 80);
     }
 
     // Scroll the column ourselves instead of relying on the browser's
     // native wheel/touch scroll gesture. Inside a Dialog, Radix's scroll
     // lock (react-remove-scroll) only whitelists DialogContent's own DOM
-    // subtree — our popover is portaled elsewhere, so native scroll
+    // subtree – our popover is portaled elsewhere, so native scroll
     // gestures on it get preventDefault()'d. Setting scrollTop ourselves
     // sidesteps that entirely (still fires the normal "scroll" event
     // above, so snapping/selection keeps working the same).
-    function handleWheel(e: React.WheelEvent) {
-        e.preventDefault();
-        containerRef.current?.scrollBy({ top: e.deltaY });
-    }
+    //
+    // A mouse wheel reports ~100px per notch, which scrolling by pixels
+    // turns into ~3 rows. Instead, deltas are summed and every threshold
+    // crossed moves the wheel by exactly one row (animated by the
+    // scrollToRow effect), so one notch = one value and a trackpad's many
+    // small deltas step through the values one by one. Attached by hand
+    // because React's onWheel is passive and can't preventDefault the
+    // native scroll.
+    const wheelDeltaRef = React.useRef(0);
+    const latestRef = React.useRef({ rows, onSelect });
+    latestRef.current = { rows, onSelect };
+
+    React.useEffect(() => {
+        const container = containerRef.current;
+        if (!container) return;
+        function handleWheel(e: WheelEvent) {
+            e.preventDefault();
+            const delta =
+                e.deltaMode === WheelEvent.DOM_DELTA_LINE
+                    ? e.deltaY * ITEM_HEIGHT
+                    : e.deltaMode === WheelEvent.DOM_DELTA_PAGE
+                      ? e.deltaY * ITEM_HEIGHT * VISIBLE_ROWS
+                      : e.deltaY;
+            // a change of direction starts counting again
+            if (Math.sign(delta) !== Math.sign(wheelDeltaRef.current)) {
+                wheelDeltaRef.current = 0;
+            }
+            wheelDeltaRef.current += delta;
+            if (Math.abs(wheelDeltaRef.current) < WHEEL_STEP_THRESHOLD) return;
+
+            const { rows: currentRows, onSelect: select } = latestRef.current;
+            const direction = Math.sign(wheelDeltaRef.current);
+            wheelDeltaRef.current = 0;
+            const nextRow = Math.min(currentRows.length - 1, Math.max(0, centerRowRef.current + direction));
+            if (nextRow === centerRowRef.current) return;
+            centerRowRef.current = nextRow;
+            select(currentRows[nextRow]);
+        }
+        container.addEventListener("wheel", handleWheel, { passive: false });
+        return () => container.removeEventListener("wheel", handleWheel);
+    }, []);
 
     function handlePointerDown(e: React.PointerEvent) {
         const container = containerRef.current;
@@ -259,34 +383,39 @@ function WheelColumn({
             ref={containerRef}
             role="listbox"
             aria-label={ariaLabel}
-            // No CSS scroll-snap here on purpose — it was fighting our own
+            // No CSS scroll-snap here on purpose – it was fighting our own
             // scrollTop writes below (the browser kept "correcting" mid-
             // gesture to its own snap point, causing jumps/jitter).
             // Snapping to the nearest item is done entirely in JS instead:
-            // handleScroll's debounce + the scrollToIndex effect above.
+            // handleScroll's debounce + the scrollToRow effect above.
             className="touch-none overflow-y-scroll [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
             style={{
                 height: ITEM_HEIGHT * VISIBLE_ROWS,
                 paddingBlock: ITEM_HEIGHT * Math.floor(VISIBLE_ROWS / 2),
             }}
             onScroll={handleScroll}
-            onWheel={handleWheel}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
             onPointerUp={endDrag}
             onPointerCancel={endDrag}
         >
-            {values.map((v, i) => (
+            {rows.map((v, i) => (
                 <button
-                    key={v}
+                    key={i}
                     ref={(el) => {
                         itemRefs.current[i] = el;
                     }}
                     type="button"
                     role="option"
-                    aria-selected={i === targetIndex}
-                    className="flex h-9 w-12 shrink-0 items-center justify-center text-base tabular-nums"
-                    onClick={() => onSelect(v)}
+                    aria-selected={i === targetRow}
+                    className={cn(
+                        "flex h-9 w-12 shrink-0 items-center justify-center text-base tabular-nums transition-colors",
+                        i === targetRow ? "font-medium text-foreground" : "text-muted-foreground"
+                    )}
+                    onClick={() => {
+                        centerRowRef.current = i;
+                        onSelect(v);
+                    }}
                 >
                     {format(v)}
                 </button>
@@ -319,6 +448,26 @@ export interface TimePickerProps {
      */
     allowTyping?: boolean;
     /**
+     * Stretch the field to its container's width (e.g. a form column next to
+     * full-width inputs) instead of sizing it to its content. Default off.
+     */
+    fullWidth?: boolean;
+    /**
+     * Where the icon sits: before the time (default) or at the end of the
+     * field, like a date picker's calendar icon next to it.
+     */
+    iconPosition?: "start" | "end";
+    /**
+     * Make both wheels endless: scrolling up from 00 continues with 23 (or the
+     * last minute), like a real dial. Off by default.
+     */
+    loop?: boolean;
+    /**
+     * Milliseconds the wheel has to rest before its value commits on its own
+     * (the popover stays open). Unset = only the checkmark commits.
+     */
+    commitDelay?: number;
+    /**
      * Leading icon shown inside the trigger. Defaults to a clock icon; pass
      * `null` to render no icon at all.
      */
@@ -343,6 +492,10 @@ function TimePicker({
     placeholder = "--:--",
     disabled,
     allowTyping = false,
+    fullWidth = false,
+    iconPosition = "start",
+    loop = false,
+    commitDelay,
     icon = <Clock className="size-4" />,
     variant,
     className,
@@ -386,7 +539,7 @@ function TimePicker({
             parseFloat(inputStyles.borderLeftWidth) +
             parseFloat(inputStyles.borderRightWidth);
         setMeasuredWidth(Math.ceil(sizer.offsetWidth + horizontalExtra) + 2);
-    }, [icon, variant, className]);
+    }, [icon, iconPosition, variant, className]);
 
     // Radix's own outside-click dismissal (DismissableLayer) shares one
     // layer stack across the whole app — stacked with a Dialog's own
@@ -494,15 +647,42 @@ function TimePicker({
         onChange(formatted);
     }
 
-    function confirmWheel() {
+    // Wheel changes are only "dialed in" until confirmed. With commitDelay
+    // they also commit once the wheel has rested that long (popover stays
+    // open), so leaving without the checkmark keeps the value; fast spinning
+    // keeps restarting the delay. Typing never starts it – a half-typed "14"
+    // must not turn into "14:00" while the user is still typing.
+    const wheelTouchedRef = React.useRef(false);
+
+    function selectHourFromWheel(hour: number) {
+        wheelTouchedRef.current = true;
+        setPendingHour(hour);
+    }
+
+    function selectMinuteFromWheel(minute: number) {
+        wheelTouchedRef.current = true;
+        setPendingMinute(minute);
+    }
+
+    function commitWheel() {
+        wheelTouchedRef.current = false;
         const combined = pendingHour * 60 + effectivePendingMinute;
-        const rounded = Math.min(
-            maxMinutes,
-            Math.max(minMinutes, roundToStep(combined, step))
-        );
+        const rounded = Math.min(maxMinutes, Math.max(minMinutes, roundToStep(combined, step)));
         const formatted = formatMinutes(rounded);
         setDraft(formatted);
-        onChange(formatted);
+        if (formatted !== value) onChange(formatted);
+    }
+
+    React.useEffect(() => {
+        if (!open || commitDelay == null || !wheelTouchedRef.current) return;
+        const timer = setTimeout(commitWheel, commitDelay);
+        return () => clearTimeout(timer);
+        // commitWheel reads the pending values listed here
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [open, pendingHour, effectivePendingMinute, commitDelay]);
+
+    function confirmWheel() {
+        commitWheel();
         setOpen(false);
         inputRef.current?.blur();
     }
@@ -513,11 +693,11 @@ function TimePicker({
             onOpenChange={handleOpenChange}
         >
             <PopoverAnchor asChild>
-                <div className="relative inline-flex items-center">
+                <div className={cn("relative items-center", fullWidth ? "flex w-full" : "inline-flex")}>
                     {icon !== null && (
                         <span
                             aria-hidden
-                            className="pointer-events-none absolute left-2 flex items-center text-muted-foreground"
+                            className={cn("pointer-events-none absolute flex items-center text-muted-foreground", iconPosition === "end" ? "right-3" : "left-2")}
                         >
                             {icon}
                         </span>
@@ -544,8 +724,9 @@ function TimePicker({
                         placeholder={placeholder}
                         disabled={disabled}
                         style={{
-                            paddingLeft: icon !== null ? "1.75rem" : undefined,
-                            width: measuredWidth ?? undefined,
+                            paddingLeft: icon !== null && iconPosition === "start" ? "1.75rem" : undefined,
+                            paddingRight: icon !== null && iconPosition === "end" ? "2.25rem" : undefined,
+                            width: fullWidth ? undefined : (measuredWidth ?? undefined),
                         }}
                         className={cn(
                             timePickerTriggerVariants({ variant }),
@@ -593,16 +774,17 @@ function TimePicker({
                 onPointerDownOutside={(e) => e.preventDefault()}
                 onInteractOutside={(e) => e.preventDefault()}
             >
-                <div className="relative flex items-center gap-1">
+                <div className="relative isolate flex items-center gap-1">
                     <div
                         aria-hidden
-                        className="pointer-events-none absolute inset-x-0 top-1/2 h-9 -translate-y-1/2 rounded-md border-y border-border bg-accent/40"
+                        className="pointer-events-none absolute inset-x-0 top-1/2 -z-10 h-9 -translate-y-1/2 rounded-md border-y border-border bg-accent/40"
                     />
                     <WheelColumn
                         values={hourValues}
                         format={(v) => String(v).padStart(2, "0")}
                         selected={pendingHour}
-                        onSelect={setPendingHour}
+                        onSelect={selectHourFromWheel}
+                        loop={loop}
                         aria-label="Hodiny"
                     />
                     <span className="text-base font-medium text-muted-foreground">
@@ -612,7 +794,8 @@ function TimePicker({
                         values={minuteValues}
                         format={(v) => String(v).padStart(2, "0")}
                         selected={effectivePendingMinute}
-                        onSelect={setPendingMinute}
+                        onSelect={selectMinuteFromWheel}
+                        loop={loop}
                         aria-label="Minuty"
                     />
                 </div>

@@ -46,7 +46,11 @@ function Example() {
 | `min` / `max`  | `string`                             | `"00:00"` / `"23:45"` | `"HH:mm"`. The hour wheel is clipped to this range; the minute wheel is additionally clipped on the boundary hour(s). |
 | `defaultValue` | `string`                             | `min`           | Where the wheel opens/nudges from while `value` is still empty. Doesn't set `value` or fire `onChange` by itself. |
 | `allowTyping`  | `boolean`                            | `false`         | When `false` the field is `readOnly` — the wheel popover is the only way to change it. When `true`, free typing (any digits) is parsed and snapped to `step` on blur/Enter, and live-previews on the wheel as you type. |
+| `fullWidth`    | `boolean`                            | `false`         | Stretch the field to its container's width (e.g. a form column next to full-width inputs) instead of auto-sizing it to `00:00`. |
 | `icon`         | `React.ReactNode \| null`            | a clock icon    | Leading icon in the trigger. Pass `null` for none.                                                              |
+| `loop`         | `boolean`                            | `false`         | Endless wheels: scrolling up from `00` continues with `23` (or the last minute), like a real dial. Ignored for lists shorter than the wheel. |
+| `commitDelay`  | `number`                             | —               | Milliseconds the wheel has to rest before its value commits on its own (popover stays open, so leaving without the checkmark keeps the value). Unset = only the checkmark commits. Typing never auto-commits. |
+| `iconPosition` | `"start" \| "end"`                  | `"start"`       | Icon before the time, or at the end of the field (like a date picker's calendar icon). |
 | `variant`      | `"default" \| "ghost"`               | `"default"`     | `"default"` is the regular boxed Input look. `"ghost"` is compact/borderless/muted — for a small inline time label rather than a standalone field. |
 | `className`    | `string`                             | —               | A one-off tweak on top of `variant` (e.g. `"text-right"`) — not meant to rebuild the whole look from scratch.   |
 | `placeholder`, `disabled`, `id`, `name`, `aria-label`, `aria-invalid` | | | Passed straight through to the underlying input. |
