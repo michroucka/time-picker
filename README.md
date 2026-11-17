@@ -14,6 +14,7 @@ wheels, a confirm button instead of auto-closing on scroll, large tap targets.
 - Built against **Radix** (the `-b radix` shadcn base), not Base UI or React
   Aria. If your project was initialized with a different base, the `Popover`/
   `PopoverAnchor` API won't line up — you'd need to adapt the popover usage.
+- Needs **React 19.2+** (uses `useEffectEvent`).
 
 ## Install
 

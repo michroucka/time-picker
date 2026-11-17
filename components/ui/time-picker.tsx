@@ -134,12 +134,6 @@ function nearestIndex(values: number[], target: number) {
     return bestIndex;
 }
 
-// How many copies of the values a looping wheel renders. The wheel always
-// settles back into the middle copy, so the copies around it only have to
-// cover one fast drag or a burst of wheel notches.
-const LOOP_COPIES = 5;
-const MIDDLE_COPY = Math.floor(LOOP_COPIES / 2);
-
 // A looping wheel renders its values in an odd number of copies, at least
 // this many rows in total, so a short list (12 minutes) gets as much room
 // for a fast drag as the hours do. It keeps returning to the middle copy.
@@ -205,11 +199,15 @@ function WheelColumn({
     // The row currently at the center. With looping the selected value is on
     // several rows; this says which one, so the wheel animates to the
     // neighbouring copy (00 → 23 above it) instead of spinning a whole lap.
+    // Only read in effects and handlers, never during render.
     const centerRowRef = React.useRef(selectedIndex + middleOffset);
-    if (centerRowRef.current >= rows.length) centerRowRef.current = selectedIndex + middleOffset;
 
-    let targetRow = selectedIndex;
-    if (isLooping) {
+    function findTargetRow() {
+        if (centerRowRef.current >= rows.length) {
+            centerRowRef.current = selectedIndex + middleOffset;
+        }
+        if (!isLooping) return selectedIndex;
+        let targetRow = selectedIndex;
         let closestDistance = Infinity;
         for (let copy = 0; copy < copies; copy++) {
             const row = copy * values.length + selectedIndex;
@@ -219,6 +217,7 @@ function WheelColumn({
                 targetRow = row;
             }
         }
+        return targetRow;
     }
 
     function scrollToRow(row: number, smooth: boolean) {
@@ -231,11 +230,16 @@ function WheelColumn({
         }
     }
 
-    React.useEffect(() => {
+    const scrollToSelected = React.useEffectEvent(() => {
+        const targetRow = findTargetRow();
         centerRowRef.current = targetRow;
         scrollToRow(targetRow, hasPositionedRef.current);
         hasPositionedRef.current = true;
-    }, [targetRow]);
+    });
+
+    React.useEffect(() => {
+        scrollToSelected();
+    }, [selectedIndex, rows]);
 
     // Moves a looping wheel from an outer copy back to the same value in the
     // middle copy without animation, so there is always room to keep going.
@@ -312,8 +316,12 @@ function WheelColumn({
     // because React's onWheel is passive and can't preventDefault the
     // native scroll.
     const wheelDeltaRef = React.useRef(0);
-    const latestRef = React.useRef({ rows, onSelect });
-    latestRef.current = { rows, onSelect };
+    const stepWheelByOneRow = React.useEffectEvent((direction: number) => {
+        const nextRow = Math.min(rows.length - 1, Math.max(0, centerRowRef.current + direction));
+        if (nextRow === centerRowRef.current) return;
+        centerRowRef.current = nextRow;
+        onSelect(rows[nextRow]);
+    });
 
     React.useEffect(() => {
         const container = containerRef.current;
@@ -333,13 +341,9 @@ function WheelColumn({
             wheelDeltaRef.current += delta;
             if (Math.abs(wheelDeltaRef.current) < WHEEL_STEP_THRESHOLD) return;
 
-            const { rows: currentRows, onSelect: select } = latestRef.current;
             const direction = Math.sign(wheelDeltaRef.current);
             wheelDeltaRef.current = 0;
-            const nextRow = Math.min(currentRows.length - 1, Math.max(0, centerRowRef.current + direction));
-            if (nextRow === centerRowRef.current) return;
-            centerRowRef.current = nextRow;
-            select(currentRows[nextRow]);
+            stepWheelByOneRow(direction);
         }
         container.addEventListener("wheel", handleWheel, { passive: false });
         return () => container.removeEventListener("wheel", handleWheel);
@@ -399,6 +403,8 @@ function WheelColumn({
             onPointerUp={endDrag}
             onPointerCancel={endDrag}
         >
+            {/* By value, not row: with looping, other copies of the
+                selected value are always out of view. */}
             {rows.map((v, i) => (
                 <button
                     key={i}
@@ -407,10 +413,10 @@ function WheelColumn({
                     }}
                     type="button"
                     role="option"
-                    aria-selected={i === targetRow}
+                    aria-selected={v === values[selectedIndex]}
                     className={cn(
                         "flex h-9 w-12 shrink-0 items-center justify-center text-base tabular-nums transition-colors",
-                        i === targetRow ? "font-medium text-foreground" : "text-muted-foreground"
+                        v === values[selectedIndex] ? "font-medium text-foreground" : "text-muted-foreground"
                     )}
                     onClick={() => {
                         centerRowRef.current = i;
@@ -526,19 +532,29 @@ function TimePicker({
         const sizer = sizerRef.current;
         const input = inputRef.current;
         if (!sizer || !input) return;
-        const inputStyles = window.getComputedStyle(input);
-        sizer.style.fontSize = inputStyles.fontSize;
-        sizer.style.fontFamily = inputStyles.fontFamily;
-        sizer.style.fontWeight = inputStyles.fontWeight;
-        sizer.style.fontStyle = inputStyles.fontStyle;
-        sizer.style.letterSpacing = inputStyles.letterSpacing;
-        sizer.style.fontVariantNumeric = inputStyles.fontVariantNumeric;
-        const horizontalExtra =
-            parseFloat(inputStyles.paddingLeft) +
-            parseFloat(inputStyles.paddingRight) +
-            parseFloat(inputStyles.borderLeftWidth) +
-            parseFloat(inputStyles.borderRightWidth);
-        setMeasuredWidth(Math.ceil(sizer.offsetWidth + horizontalExtra) + 2);
+
+        function measure(sizer: HTMLSpanElement, input: HTMLInputElement) {
+            const inputStyles = window.getComputedStyle(input);
+            sizer.style.fontSize = inputStyles.fontSize;
+            sizer.style.fontFamily = inputStyles.fontFamily;
+            sizer.style.fontWeight = inputStyles.fontWeight;
+            sizer.style.fontStyle = inputStyles.fontStyle;
+            sizer.style.letterSpacing = inputStyles.letterSpacing;
+            sizer.style.fontVariantNumeric = inputStyles.fontVariantNumeric;
+            const horizontalExtra =
+                parseFloat(inputStyles.paddingLeft) +
+                parseFloat(inputStyles.paddingRight) +
+                parseFloat(inputStyles.borderLeftWidth) +
+                parseFloat(inputStyles.borderRightWidth);
+            setMeasuredWidth(Math.ceil(sizer.offsetWidth + horizontalExtra) + 2);
+        }
+
+        measure(sizer, input);
+        // Inside a hidden parent (e.g. an inactive tab kept mounted) the
+        // first measurement is 0 – measure again once it becomes visible.
+        const observer = new ResizeObserver(() => measure(sizer, input));
+        observer.observe(sizer);
+        return () => observer.disconnect();
     }, [icon, iconPosition, variant, className]);
 
     // Radix's own outside-click dismissal (DismissableLayer) shares one
